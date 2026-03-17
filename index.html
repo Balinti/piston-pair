@@ -3,268 +3,157 @@
 <head>
 <meta charset="UTF-8">
 <title>Piston Pair - Free HTML5 Game</title>
-<meta name="description" content="Play Piston Pair - Stack descending clockwork blocks by splitting them mid-air to fill two parallel mechanical shafts.">
+<meta name="description" content="Play Piston Pair - Swipe to route clanking cog blocks onto two piston platforms, building twin towers before the engine overloads.">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<meta name="theme-color" content="#1a0a2e">
+<meta name="theme-color" content="#1a0a00">
 <meta property="og:title" content="Piston Pair - Free HTML5 Game">
-<meta property="og:description" content="Rhythmic one-tap piston lock game. Time the ring. Tap. Stack the blocks.">
+<meta property="og:description" content="Route falling cog blocks onto the correct piston. Build twin towers. Don't overload the engine.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://balinti.github.io/piston-pair/">
 <meta property="og:image" content="https://balinti.github.io/piston-pair/preview.png">
 <meta name="twitter:card" content="summary_large_image">
 <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4099346100621490" crossorigin="anonymous"></script>
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: #0d0618;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    font-family: 'Courier New', monospace;
-    overflow: hidden;
-    touch-action: none;
-  }
-  #gameContainer {
-    position: relative;
-    width: 100%;
-    max-width: 420px;
-    max-height: 750px;
-  }
-  canvas {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#110800;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  min-height:100vh;
+  overflow:hidden;
+  touch-action:none;
+  font-family:'Courier New',monospace;
+}
+#gc {
+  position:relative;
+  width:100%;
+  max-width:420px;
+}
+canvas {
+  display:block;
+  width:100%;
+  height:100%;
+}
 </style>
 </head>
 <body>
-<div id="gameContainer">
-  <canvas id="c"></canvas>
-</div>
+<div id="gc"><canvas id="c"></canvas></div>
 <script>
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
-const container = document.getElementById('gameContainer');
-
+const container = document.getElementById('gc');
 const DPR = window.devicePixelRatio || 1;
 let W, H;
 
 function resize() {
-  const rect = container.getBoundingClientRect();
-  W = Math.min(rect.width || 420, 420);
+  const cw = Math.min(container.getBoundingClientRect().width || 420, 420);
+  W = cw;
   H = Math.min(window.innerHeight, 750);
   container.style.height = H + 'px';
   canvas.width = W * DPR;
   canvas.height = H * DPR;
   canvas.style.width = W + 'px';
   canvas.style.height = H + 'px';
-  ctx.scale(DPR, DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 }
 resize();
-window.addEventListener('resize', () => { resize(); });
+window.addEventListener('resize', resize);
 
-// --- State ---
-let state = 'start';
+// ── constants ──────────────────────────────────────────────
+const COG_COLORS = [
+  { h: 28, s: 90, l: 55, name: 'orange' },   // warm orange
+  { h: 185, s: 80, l: 48, name: 'teal' }     // industrial teal
+];
+const WILDCARD_COLOR = { h: 0, s: 0, l: 75, name: 'silver' };
+const BLOCK_SIZE = 44;           // cog block size
+const CEIL_PAD = 60;             // top UI zone
+const FLOOR_Y_RATIO = 0.88;      // piston platform Y
+const PISTON_W = 130;
+const PISTON_GAP = 16;
+const MAX_TOWER = 8;             // blocks before ceiling = game over
+
+// ── state ──────────────────────────────────────────────────
+let state = 'start';  // start | playing | gameover
 let score = 0;
-let best = parseInt(localStorage.getItem('pistonpair_best') || '0');
-let hue = 200;
+let best = parseInt(localStorage.getItem('pp_best') || '0');
+let particles = [];
+let bgGears = [];
 let shakeFrames = 0;
 let shakeAmt = 0;
-let particles = [];
-let impactFlashes = [];
+let globalHue = 28;
 
-// Shaft geometry
-const SHAFT_W = 72;
-let shaftX, shaftTop, shaftBottom;
-function updateShaftGeom() {
-  shaftX = W / 2 - SHAFT_W / 2;
-  shaftTop = H * 0.10;
-  shaftBottom = H * 0.88;
+// Towers: left and right, each has array of placed blocks (bottom→top)
+let towers = { left: [], right: [] };
+// Piston base colors (index into COG_COLORS)
+let pistonColor = { left: 0, right: 1 };
+// Falling block
+let fallingBlock = null;
+let fallSpeed = 2.0;
+let blockCount = 0;     // total placed this game
+let nextWildcard = 20;
+let pistonPump = { left: 0, right: 0 };  // animation phase
+
+// ── geometry helpers ──────────────────────────────────────
+function leftPistonX() { return W / 2 - PISTON_GAP / 2 - PISTON_W; }
+function rightPistonX() { return W / 2 + PISTON_GAP / 2; }
+function pistonTopY() { return H * FLOOR_Y_RATIO; }
+function towerTopY(side) {
+  const count = towers[side].length;
+  return pistonTopY() - count * (BLOCK_SIZE + 2);
 }
-updateShaftGeom();
+function spawnX() { return W / 2 - BLOCK_SIZE / 2; }
 
-// Block
-const BLOCK_H = 36;
-const BLOCK_FALL_SPEED_BASE = 2.2;
-let block = null;
-let stack = []; // y positions of stacked blocks (from bottom up)
-
-// Pistons
-// side: 'left' | 'right'
-// Each piston has its own ring oscillation speed
-let pistons = {
-  left:  { x: 0, side: 'left',  ringT: 0, speed: 1.0, active: false, stamping: false, stampT: 0 },
-  right: { x: 0, side: 'right', ringT: Math.PI * 0.4, speed: 1.4, active: true, stamping: false, stampT: 0 }
-};
-let activeSide = 'left'; // which piston is currently firing
-let tapConsumed = false;
-
-// Difficulty
-let diffTimer = 0;
-let fallSpeed = BLOCK_FALL_SPEED_BASE;
-let ringSpeedMult = 1.0;
-
-// --- Helpers ---
-function lerp(a, b, t) { return a + (b - a) * t; }
-function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-function spawnBlock() {
-  block = {
-    x: shaftX,
-    y: shaftTop - BLOCK_H,
-    w: SHAFT_W,
-    h: BLOCK_H,
-    vel: fallSpeed,
-    hue: hue,
-    locked: false
-  };
-}
-
-function getStackTop() {
-  if (stack.length === 0) return shaftBottom;
-  return stack[stack.length - 1].y;
-}
-
-function getPistonGeom(side) {
-  const pX = side === 'left' ? shaftX - 8 : shaftX + SHAFT_W + 8;
-  const py = H * 0.5;
-  return { pX, py };
-}
-
-function getRingRadius(piston) {
-  // Ring expands from 0 to maxR and back, peak at PI
-  const t = (Math.sin(piston.ringT) + 1) / 2; // 0..1
-  const maxR = 44;
-  return t * maxR;
-}
-
-function isRingAtWall(piston) {
-  const r = getRingRadius(piston);
-  const maxR = 44;
-  // Perfect window: ring is within 8px of max
-  return r >= maxR - 8;
-}
-
-function firePiston(side) {
-  const p = pistons[side];
-  if (p.stamping) return;
-  p.stamping = true;
-  p.stampT = 0;
-  tapConsumed = true;
-
-  const perfect = isRingAtWall(p);
-  lockBlock(perfect, side);
-}
-
-function lockBlock(perfect, side) {
-  if (!block || block.locked) return;
-
-  block.locked = true;
-  const stackTop = getStackTop();
-  const targetY = stackTop - BLOCK_H;
-
-  // Check if block reached piston zone (roughly mid-height)
-  // Accept any lock while block is above stack
-  if (block.y > stackTop) {
-    // Missed — block went too low
-    triggerGameOver();
-    return;
+// ── init ───────────────────────────────────────────────────
+function initBgGears() {
+  bgGears = [];
+  for (let i = 0; i < 5; i++) {
+    bgGears.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: 30 + Math.random() * 60,
+      teeth: 8 + Math.floor(Math.random() * 8),
+      angle: Math.random() * Math.PI * 2,
+      speed: (Math.random() - 0.5) * 0.003,
+      alpha: 0.04 + Math.random() * 0.06
+    });
   }
-
-  // Snap block to stack
-  block.y = targetY;
-  block.perfect = perfect;
-
-  stack.push({ y: targetY, hue: block.hue, perfect });
-
-  // Keep stack from growing beyond shaft top
-  while (stack.length > 0 && stack[stack.length - 1].y < shaftTop + BLOCK_H) {
-    // Stack overflow
-    triggerGameOver();
-    return;
-  }
-
-  score++;
-  if (score > best) { best = score; localStorage.setItem('pistonpair_best', best); }
-
-  hue = (hue + 18) % 360;
-
-  // Particles
-  spawnImpact(block.x + block.w / 2, block.y + block.h / 2, perfect);
-
-  block = null;
-
-  // Speed up
-  fallSpeed = BLOCK_FALL_SPEED_BASE + score * 0.04;
-  ringSpeedMult = 1.0 + score * 0.008;
-
-  // Alternate active piston
-  activeSide = activeSide === 'left' ? 'right' : 'left';
-  pistons.left.active = activeSide === 'left';
-  pistons.right.active = activeSide === 'right';
-
-  spawnBlock();
-}
-
-function triggerGameOver() {
-  state = 'gameover';
-  shakeFrames = 28;
-  shakeAmt = 10;
-  // Burst particles
-  if (block) {
-    for (let i = 0; i < 24; i++) spawnParticle(block.x + block.w / 2, block.y + block.h / 2, 200);
-  }
-}
-
-function spawnParticle(x, y, h) {
-  const angle = Math.random() * Math.PI * 2;
-  const speed = 2 + Math.random() * 5;
-  particles.push({
-    x, y,
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed,
-    life: 1.0,
-    decay: 0.025 + Math.random() * 0.03,
-    size: 3 + Math.random() * 4,
-    hue: h
-  });
-}
-
-function spawnImpact(x, y, perfect) {
-  const count = perfect ? 18 : 8;
-  for (let i = 0; i < count; i++) spawnParticle(x, y, hue);
-  impactFlashes.push({ x, y, r: 0, maxR: perfect ? 60 : 30, life: 1.0 });
 }
 
 function initGame() {
   score = 0;
-  hue = 200;
+  blockCount = 0;
+  fallSpeed = 2.0;
+  nextWildcard = 20;
+  towers = { left: [], right: [] };
+  pistonColor = { left: 0, right: 1 };
   particles = [];
-  impactFlashes = [];
-  stack = [];
-  fallSpeed = BLOCK_FALL_SPEED_BASE;
-  ringSpeedMult = 1.0;
-  diffTimer = 0;
-  activeSide = 'left';
-  pistons.left.active = true;
-  pistons.right.active = false;
-  pistons.left.stamping = false;
-  pistons.right.stamping = false;
-  pistons.left.stampT = 0;
-  pistons.right.stampT = 0;
-  pistons.left.ringT = 0;
-  pistons.right.ringT = Math.PI * 0.4;
-  pistons.left.speed = 1.0;
-  pistons.right.speed = 1.4;
   shakeFrames = 0;
-
-  updateShaftGeom();
+  fallingBlock = null;
   spawnBlock();
 }
 
-// --- Input ---
-function onTap() {
+function spawnBlock() {
+  const isWild = blockCount > 0 && blockCount % 20 === 0;
+  // alternate color with slight randomness
+  const colorIdx = Math.random() < 0.5 ? 0 : 1;
+  fallingBlock = {
+    x: spawnX(),
+    y: CEIL_PAD - BLOCK_SIZE,
+    vy: fallSpeed,
+    colorIdx: isWild ? -1 : colorIdx,
+    isWild,
+    angle: 0,        // spin as it falls
+    locked: false,
+    targetSide: null,
+    targetX: null,
+    sliding: false,
+    slideT: 0
+  };
+}
+
+// ── input ──────────────────────────────────────────────────
+function onTap(clientX) {
   if (state === 'start') {
     state = 'playing';
     initGame();
@@ -275,409 +164,641 @@ function onTap() {
     initGame();
     return;
   }
-  if (state === 'playing') {
-    firePiston(activeSide);
-  }
+  if (state !== 'playing' || !fallingBlock || fallingBlock.locked) return;
+
+  const side = clientX < W / 2 ? 'left' : 'right';
+  routeBlock(side);
 }
 
-canvas.addEventListener('pointerdown', e => { e.preventDefault(); onTap(); });
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  onTap(e.clientX - rect.left);
+});
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); onTap(); }
+  if (e.code === 'ArrowLeft' || e.code === 'KeyA') onTap(0);
+  else if (e.code === 'ArrowRight' || e.code === 'KeyD') onTap(W);
+  else if (e.code === 'Space' || e.code === 'Enter') { e.preventDefault(); onTap(W / 2 - 1); }
 });
 
-// --- Drawing ---
-function drawBg() {
-  const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, '#0d0618');
-  grad.addColorStop(1, '#1a0830');
-  ctx.fillStyle = grad;
-  ctx.fillRect(0, 0, W, H);
+// ── game logic ─────────────────────────────────────────────
+function routeBlock(side) {
+  if (!fallingBlock || fallingBlock.locked) return;
+  const fb = fallingBlock;
 
-  // subtle grid lines
-  ctx.strokeStyle = 'rgba(120,80,200,0.06)';
-  ctx.lineWidth = 1;
-  for (let y = 0; y < H; y += 30) {
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  // Validate placement
+  if (!fb.isWild) {
+    const tower = towers[side];
+    if (tower.length > 0) {
+      // piston already has blocks — color must match piston color
+      const pc = pistonColor[side];
+      if (fb.colorIdx !== pc) {
+        // wrong color → overload
+        triggerOverload(side);
+        return;
+      }
+    }
   }
-  for (let x = 0; x < W; x += 30) {
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+
+  // Accept block — slide it to target piston
+  fb.locked = true;
+  fb.targetSide = side;
+  fb.sliding = true;
+  fb.slideT = 0;
+  const targetX = side === 'left'
+    ? leftPistonX() + PISTON_W / 2 - BLOCK_SIZE / 2
+    : rightPistonX() + PISTON_W / 2 - BLOCK_SIZE / 2;
+  fb.targetX = targetX;
+  fb.startX = fb.x;
+  fb.startY = fb.y;
+  fb.targetY = towerTopY(side) - BLOCK_SIZE;
+
+  // If first block on this piston and not wild, set piston color
+  if (towers[side].length === 0 && !fb.isWild) {
+    pistonColor[side] = fb.colorIdx;
+  }
+
+  // pump animation
+  pistonPump[side] = 1.0;
+}
+
+function placeBlock(fb) {
+  const side = fb.targetSide;
+  const tower = towers[side];
+
+  // land it
+  tower.push({
+    colorIdx: fb.colorIdx,
+    isWild: fb.isWild,
+    y: towerTopY(side) - BLOCK_SIZE,
+    bounceT: 0
+  });
+
+  score++;
+  blockCount++;
+  if (score > best) { best = score; localStorage.setItem('pp_best', best); }
+
+  // Speed up every 10 blocks
+  if (blockCount % 10 === 0) {
+    fallSpeed = Math.min(2.0 + blockCount * 0.18, 9.0);
+  }
+
+  // Check tower height overflow
+  if (tower.length >= MAX_TOWER || towerTopY(side) < CEIL_PAD + BLOCK_SIZE) {
+    triggerOverload(side);
+    return;
+  }
+
+  // Sparks
+  const cx = fb.targetSide === 'left'
+    ? leftPistonX() + PISTON_W / 2
+    : rightPistonX() + PISTON_W / 2;
+  const cy = towerTopY(side);
+  spawnSparks(cx, cy, fb.isWild ? WILDCARD_COLOR : COG_COLORS[fb.colorIdx], 16);
+
+  fallingBlock = null;
+  spawnBlock();
+}
+
+function triggerOverload(side) {
+  state = 'gameover';
+  shakeFrames = 35;
+  shakeAmt = 12;
+  // steam burst
+  const cx = side === 'left'
+    ? leftPistonX() + PISTON_W / 2
+    : rightPistonX() + PISTON_W / 2;
+  const cy = pistonTopY();
+  for (let i = 0; i < 40; i++) {
+    spawnSteam(cx, cy);
   }
 }
 
-function drawShaft() {
-  // Shaft walls
-  ctx.strokeStyle = `hsla(${hue},60%,60%,0.5)`;
-  ctx.lineWidth = 2;
-  // Left wall
-  ctx.beginPath();
-  ctx.moveTo(shaftX, shaftTop);
-  ctx.lineTo(shaftX, shaftBottom);
-  ctx.stroke();
-  // Right wall
-  ctx.beginPath();
-  ctx.moveTo(shaftX + SHAFT_W, shaftTop);
-  ctx.lineTo(shaftX + SHAFT_W, shaftBottom);
-  ctx.stroke();
-
-  // Shaft floor
-  ctx.strokeStyle = `hsla(${hue},70%,65%,0.8)`;
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(shaftX - 6, shaftBottom);
-  ctx.lineTo(shaftX + SHAFT_W + 6, shaftBottom);
-  ctx.stroke();
-
-  // Shaft top opening
-  ctx.strokeStyle = `hsla(${hue},50%,50%,0.3)`;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(shaftX - 6, shaftTop);
-  ctx.lineTo(shaftX + SHAFT_W + 6, shaftTop);
-  ctx.stroke();
-
-  // Inner shaft glow
-  const innerGrad = ctx.createLinearGradient(shaftX, 0, shaftX + SHAFT_W, 0);
-  innerGrad.addColorStop(0, `hsla(${hue},50%,30%,0.04)`);
-  innerGrad.addColorStop(0.5, `hsla(${hue},60%,50%,0.10)`);
-  innerGrad.addColorStop(1, `hsla(${hue},50%,30%,0.04)`);
-  ctx.fillStyle = innerGrad;
-  ctx.fillRect(shaftX, shaftTop, SHAFT_W, shaftBottom - shaftTop);
-}
-
-function drawStack() {
-  for (let i = 0; i < stack.length; i++) {
-    const s = stack[i];
-    drawBlock(shaftX, s.y, SHAFT_W, BLOCK_H, s.hue, s.perfect ? 0.95 : 0.7, i);
+// ── particles ──────────────────────────────────────────────
+function spawnSparks(x, y, col, n) {
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const sp = 1.5 + Math.random() * 5;
+    particles.push({
+      type: 'spark',
+      x, y,
+      vx: Math.cos(ang) * sp,
+      vy: Math.sin(ang) * sp - 2,
+      life: 1.0,
+      decay: 0.03 + Math.random() * 0.04,
+      size: 2 + Math.random() * 3,
+      h: col.h, s: col.s, l: col.l + 20
+    });
   }
 }
 
-function drawBlock(x, y, w, h, bHue, brightness, idx) {
-  // Block body
-  const grad = ctx.createLinearGradient(x, y, x + w, y + h);
-  grad.addColorStop(0, `hsla(${bHue},70%,${Math.round(brightness * 35)}%,0.95)`);
-  grad.addColorStop(0.5, `hsla(${bHue},80%,${Math.round(brightness * 55)}%,0.95)`);
-  grad.addColorStop(1, `hsla(${bHue},70%,${Math.round(brightness * 35)}%,0.95)`);
-  ctx.fillStyle = grad;
-  ctx.fillRect(x, y, w, h);
+function spawnSteam(x, y) {
+  particles.push({
+    type: 'steam',
+    x: x + (Math.random() - 0.5) * 30,
+    y,
+    vx: (Math.random() - 0.5) * 3,
+    vy: -1 - Math.random() * 4,
+    life: 1.0,
+    decay: 0.018 + Math.random() * 0.02,
+    size: 8 + Math.random() * 12,
+    h: 30, s: 20, l: 80
+  });
+}
 
-  // Top highlight
-  ctx.fillStyle = `hsla(${bHue},90%,80%,0.3)`;
-  ctx.fillRect(x + 2, y + 2, w - 4, 3);
-
-  // Rivet details
-  ctx.fillStyle = `hsla(${bHue},50%,80%,0.6)`;
-  const rivetY = y + h / 2;
-  for (let rx = x + 10; rx < x + w - 6; rx += 18) {
+// ── draw helpers ───────────────────────────────────────────
+function drawGear(x, y, r, teeth, angle, alpha) {
+  const ir = r * 0.65;
+  const toothH = r * 0.28;
+  const toothW = (2 * Math.PI * r) / (teeth * 2.5);
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = '#c06020';
+  ctx.lineWidth = 1.5;
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  // outer ring
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.stroke();
+  // inner ring
+  ctx.beginPath();
+  ctx.arc(0, 0, ir, 0, Math.PI * 2);
+  ctx.stroke();
+  // hub
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.18, 0, Math.PI * 2);
+  ctx.stroke();
+  // teeth
+  for (let i = 0; i < teeth; i++) {
+    const a = (i / teeth) * Math.PI * 2;
+    const x1 = Math.cos(a - toothW / r) * r;
+    const y1 = Math.sin(a - toothW / r) * r;
+    const x2 = Math.cos(a - toothW / r) * (r + toothH);
+    const y2 = Math.sin(a - toothW / r) * (r + toothH);
+    const x3 = Math.cos(a + toothW / r) * (r + toothH);
+    const y3 = Math.sin(a + toothW / r) * (r + toothH);
+    const x4 = Math.cos(a + toothW / r) * r;
+    const y4 = Math.sin(a + toothW / r) * r;
     ctx.beginPath();
-    ctx.arc(rx, rivetY, 2.5, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineTo(x3, y3);
+    ctx.lineTo(x4, y4);
+    ctx.stroke();
   }
+  ctx.restore();
+}
+
+function drawCogBlock(cx, cy, size, colorIdx, isWild, angle, alpha) {
+  const col = isWild ? WILDCARD_COLOR : COG_COLORS[colorIdx];
+  const r = size / 2;
+  const teeth = 8;
+  const toothSize = r * 0.22;
+
+  ctx.save();
+  ctx.globalAlpha = alpha !== undefined ? alpha : 1;
+  ctx.translate(cx, cy);
+  ctx.rotate(angle || 0);
+
+  // Wildcard glow
+  if (isWild) {
+    ctx.save();
+    ctx.globalAlpha = (alpha || 1) * 0.35;
+    const grd = ctx.createRadialGradient(0, 0, r * 0.3, 0, 0, r * 1.6);
+    grd.addColorStop(0, 'rgba(255,255,220,0.9)');
+    grd.addColorStop(1, 'rgba(255,255,220,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 1.6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Octagonal body with teeth
+  ctx.beginPath();
+  for (let i = 0; i < teeth; i++) {
+    const a0 = (i / teeth) * Math.PI * 2 - Math.PI / teeth;
+    const a1 = a0 + Math.PI / teeth * 0.5;
+    const a2 = a1 + Math.PI / teeth;
+    const a3 = a2 + Math.PI / teeth * 0.5;
+    if (i === 0) ctx.moveTo(Math.cos(a0) * r, Math.sin(a0) * r);
+    ctx.lineTo(Math.cos(a0) * r, Math.sin(a0) * r);
+    ctx.lineTo(Math.cos(a1) * (r + toothSize), Math.sin(a1) * (r + toothSize));
+    ctx.lineTo(Math.cos(a2) * (r + toothSize), Math.sin(a2) * (r + toothSize));
+    ctx.lineTo(Math.cos(a3) * r, Math.sin(a3) * r);
+  }
+  ctx.closePath();
+
+  // Fill gradient
+  if (isWild) {
+    const g = ctx.createRadialGradient(0, -r * 0.2, 0, 0, 0, r);
+    g.addColorStop(0, `hsl(${col.h},${col.s}%,${col.l + 15}%)`);
+    g.addColorStop(1, `hsl(${col.h},${col.s}%,${col.l - 20}%)`);
+    ctx.fillStyle = g;
+  } else {
+    const g = ctx.createRadialGradient(-r * 0.2, -r * 0.3, 0, 0, 0, r * 1.1);
+    g.addColorStop(0, `hsl(${col.h},${col.s}%,${col.l + 12}%)`);
+    g.addColorStop(0.6, `hsl(${col.h},${col.s}%,${col.l}%)`);
+    g.addColorStop(1, `hsl(${col.h},${col.s}%,${col.l - 18}%)`);
+    ctx.fillStyle = g;
+  }
+  ctx.fill();
 
   // Border
-  ctx.strokeStyle = `hsla(${bHue},80%,75%,0.7)`;
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(x + 0.75, y + 0.75, w - 1.5, h - 1.5);
+  ctx.strokeStyle = isWild
+    ? 'rgba(255,255,240,0.8)'
+    : `hsl(${col.h},${col.s}%,${col.l + 25}%)`;
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+
+  // Hub circle
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.28, 0, Math.PI * 2);
+  ctx.fillStyle = isWild ? 'rgba(255,255,255,0.5)' : `hsl(${col.h},${col.s}%,${col.l + 20}%)`;
+  ctx.fill();
+  ctx.strokeStyle = isWild ? 'rgba(255,255,255,0.8)' : `hsl(${col.h},${col.s}%,${col.l + 30}%)`;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Spokes
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r * 0.28, Math.sin(a) * r * 0.28);
+    ctx.lineTo(Math.cos(a) * r * 0.62, Math.sin(a) * r * 0.62);
+    ctx.strokeStyle = isWild ? 'rgba(255,255,255,0.4)' : `hsl(${col.h},${col.s}%,${col.l + 15}%)`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a + Math.PI) * r * 0.28, Math.sin(a + Math.PI) * r * 0.28);
+    ctx.lineTo(Math.cos(a + Math.PI) * r * 0.62, Math.sin(a + Math.PI) * r * 0.62);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function drawPiston(side) {
+  const px = side === 'left' ? leftPistonX() : rightPistonX();
+  const py = pistonTopY();
+  const col = COG_COLORS[pistonColor[side]];
+  const pump = pistonPump[side];
+
+  // Cylinder body
+  ctx.fillStyle = '#2a1a08';
+  ctx.strokeStyle = '#6b3d10';
+  ctx.lineWidth = 2;
+  ctx.fillRect(px, py, PISTON_W, 28);
+  ctx.strokeRect(px, py, PISTON_W, 28);
+
+  // Color accent stripe
+  ctx.fillStyle = `hsla(${col.h},${col.s}%,${col.l}%,0.7)`;
+  ctx.fillRect(px + 4, py + 4, PISTON_W - 8, 8);
+
+  // Piston shaft (animated)
+  const shaftY = py + 14 + pump * 12;
+  ctx.fillStyle = '#8a5a20';
+  ctx.fillRect(px + PISTON_W / 2 - 8, shaftY, 16, 40 + pump * 8);
+  ctx.strokeStyle = '#c08040';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px + PISTON_W / 2 - 8, shaftY, 16, 40 + pump * 8);
+
+  // Rivets
+  ctx.fillStyle = '#c0a060';
+  [px + 12, px + PISTON_W - 12].forEach(rx => {
+    ctx.beginPath();
+    ctx.arc(rx, py + 14, 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Platform glow when active
+  if (pump > 0.1) {
+    ctx.save();
+    ctx.globalAlpha = pump * 0.4;
+    ctx.strokeStyle = `hsl(${col.h},${col.s}%,${col.l + 20}%)`;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(px - 2, py - 2, PISTON_W + 4, 32);
+    ctx.restore();
+  }
+
+  // Color indicator label
+  ctx.fillStyle = `hsla(${col.h},${col.s}%,${col.l + 15}%,0.9)`;
+  ctx.font = `bold 11px 'Courier New',monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText(col.name.toUpperCase(), px + PISTON_W / 2, py + 20);
+}
+
+function drawTower(side) {
+  const tower = towers[side];
+  const px = side === 'left' ? leftPistonX() : rightPistonX();
+  const baseY = pistonTopY();
+
+  for (let i = 0; i < tower.length; i++) {
+    const blk = tower[i];
+    const compress = Math.min(i * 0.5, 3); // slight compression visual
+    const bY = baseY - (i + 1) * (BLOCK_SIZE + 2) + compress;
+    const cx = px + PISTON_W / 2;
+    const cy = bY + BLOCK_SIZE / 2;
+    drawCogBlock(cx, cy, BLOCK_SIZE - 2, blk.colorIdx, blk.isWild, blk.angle || 0);
+  }
 }
 
 function drawFallingBlock() {
-  if (!block) return;
-  drawBlock(block.x, block.y, block.w, block.h, block.hue, 0.85, -1);
+  const fb = fallingBlock;
+  if (!fb) return;
+  drawCogBlock(fb.x + BLOCK_SIZE / 2, fb.y + BLOCK_SIZE / 2,
+    BLOCK_SIZE, fb.colorIdx, fb.isWild, fb.angle);
 
   // Drop shadow
-  ctx.fillStyle = `hsla(${block.hue},60%,20%,0.3)`;
-  ctx.fillRect(block.x + 4, block.y + block.h, block.w - 8, 8);
-}
-
-function drawPiston(side, p, dt) {
-  const isActive = side === activeSide;
-  const { pX, py } = getPistonGeom(side);
-  const isLeft = side === 'left';
-
-  // Piston arm
-  const armLen = 40;
-  const armX = isLeft ? pX - armLen : pX;
-  const armDir = isLeft ? 1 : -1;
-
-  // Stamp animation
-  let stampOffset = 0;
-  if (p.stamping) {
-    const t = p.stampT;
-    if (t < 0.3) stampOffset = (t / 0.3) * 28 * armDir;
-    else if (t < 0.6) stampOffset = lerp(28, 0, (t - 0.3) / 0.3) * armDir;
-    else { p.stamping = false; p.stampT = 0; stampOffset = 0; }
-  }
-
-  const headX = isLeft ? shaftX - 4 + stampOffset : shaftX + SHAFT_W + 4 + stampOffset;
-
-  // Draw arm body
-  ctx.strokeStyle = isActive ? `hsla(${hue},70%,65%,0.9)` : `hsla(${hue},30%,35%,0.5)`;
-  ctx.lineWidth = 10;
-  ctx.lineCap = 'round';
+  ctx.save();
+  ctx.globalAlpha = 0.25;
+  ctx.fillStyle = '#000';
   ctx.beginPath();
-  if (isLeft) {
-    ctx.moveTo(headX - 8, py);
-    ctx.lineTo(headX - 8 - armLen, py);
-  } else {
-    ctx.moveTo(headX + 8, py);
-    ctx.lineTo(headX + 8 + armLen, py);
-  }
-  ctx.stroke();
-
-  // Draw piston head
-  const headW = 18, headH = BLOCK_H + 8;
-  ctx.fillStyle = isActive ? `hsla(${hue},70%,55%,0.95)` : `hsla(${hue},25%,30%,0.7)`;
-  if (isLeft) {
-    ctx.fillRect(headX - headW, py - headH / 2, headW, headH);
-    // Face
-    ctx.fillStyle = isActive ? `hsla(${hue},80%,75%,0.9)` : `hsla(${hue},20%,45%,0.5)`;
-    ctx.fillRect(headX - 4, py - headH / 2 + 4, 4, headH - 8);
-  } else {
-    ctx.fillRect(headX, py - headH / 2, headW, headH);
-    ctx.fillStyle = isActive ? `hsla(${hue},80%,75%,0.9)` : `hsla(${hue},20%,45%,0.5)`;
-    ctx.fillRect(headX, py - headH / 2 + 4, 4, headH - 8);
-  }
-
-  // Ring (only for active piston)
-  if (isActive && !p.stamping) {
-    const r = getRingRadius(p);
-    const ringX = isLeft ? shaftX - 12 : shaftX + SHAFT_W + 12;
-    const perfect = isRingAtWall(p);
-
-    const ringAlpha = perfect ? 1.0 : 0.5;
-    const ringColor = perfect
-      ? `hsla(${hue},100%,75%,${ringAlpha})`
-      : `hsla(${hue},60%,55%,${ringAlpha})`;
-
-    ctx.beginPath();
-    ctx.arc(ringX, py, r, 0, Math.PI * 2);
-    ctx.strokeStyle = ringColor;
-    ctx.lineWidth = perfect ? 3 : 1.5;
-    ctx.stroke();
-
-    if (perfect) {
-      // Outer glow
-      ctx.beginPath();
-      ctx.arc(ringX, py, r + 6, 0, Math.PI * 2);
-      ctx.strokeStyle = `hsla(${hue},100%,85%,0.25)`;
-      ctx.lineWidth = 8;
-      ctx.stroke();
-    }
-  }
+  ctx.ellipse(fb.x + BLOCK_SIZE / 2, fb.y + BLOCK_SIZE + 4, BLOCK_SIZE / 2 - 4, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 }
 
 function drawParticles() {
   for (const p of particles) {
+    ctx.save();
     ctx.globalAlpha = p.life;
-    ctx.fillStyle = `hsl(${p.hue},80%,65%)`;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
-    ctx.fill();
+    if (p.type === 'steam') {
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+      g.addColorStop(0, `hsla(${p.h},${p.s}%,${p.l}%,0.6)`);
+      g.addColorStop(1, `hsla(${p.h},${p.s}%,${p.l}%,0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillStyle = `hsl(${p.h},${p.s}%,${p.l}%)`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
   }
-  ctx.globalAlpha = 1;
 }
 
-function drawImpactFlashes() {
-  for (const f of impactFlashes) {
-    ctx.beginPath();
-    ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2);
-    ctx.strokeStyle = `hsla(${hue},100%,80%,${f.life * 0.7})`;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+function drawBg() {
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0e0600');
+  grad.addColorStop(0.5, '#1a0c04');
+  grad.addColorStop(1, '#0a0400');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Subtle grid
+  ctx.strokeStyle = 'rgba(180,80,10,0.05)';
+  ctx.lineWidth = 1;
+  for (let y = 0; y < H; y += 40) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  for (let x = 0; x < W; x += 40) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  // Background gears
+  for (const g of bgGears) {
+    drawGear(g.x, g.y, g.r, g.teeth, g.angle, g.alpha);
   }
 }
 
-function drawScore() {
-  ctx.fillStyle = `hsla(${hue},80%,80%,0.95)`;
-  ctx.font = `bold ${Math.round(H * 0.045)}px 'Courier New', monospace`;
+function drawDivider() {
+  // Center divider line
+  ctx.strokeStyle = 'rgba(180,80,10,0.3)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([6, 8]);
+  ctx.beginPath();
+  ctx.moveTo(W / 2, CEIL_PAD);
+  ctx.lineTo(W / 2, pistonTopY());
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // L/R labels
+  ctx.fillStyle = 'rgba(200,100,20,0.4)';
+  ctx.font = `bold 13px 'Courier New',monospace`;
   ctx.textAlign = 'center';
-  ctx.fillText(score, W / 2, shaftTop - 16);
-
-  ctx.fillStyle = `hsla(${hue},50%,60%,0.6)`;
-  ctx.font = `${Math.round(H * 0.025)}px 'Courier New', monospace`;
-  ctx.fillText(`BEST: ${best}`, W / 2, shaftTop - 34);
+  ctx.fillText('◀ L', W / 4, CEIL_PAD + 22);
+  ctx.fillText('R ▶', W * 3 / 4, CEIL_PAD + 22);
 }
 
 function drawHUD() {
-  // Active side indicator
-  const indY = H * 0.94;
-  const leftX = W / 2 - 50;
-  const rightX = W / 2 + 50;
-
-  // Left indicator
-  ctx.fillStyle = activeSide === 'left' ? `hsla(${hue},90%,75%,1)` : `hsla(${hue},30%,40%,0.4)`;
-  ctx.beginPath();
-  ctx.arc(leftX, indY, activeSide === 'left' ? 9 : 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = `hsla(${hue},50%,80%,0.7)`;
-  ctx.font = `${Math.round(H * 0.018)}px 'Courier New', monospace`;
+  ctx.fillStyle = '#c07030';
+  ctx.font = `bold 15px 'Courier New',monospace`;
   ctx.textAlign = 'center';
-  ctx.fillText('L', leftX, indY + 4);
+  ctx.fillText(`BLOCKS PLACED: ${score}`, W / 2, 26);
 
-  // Right indicator
-  ctx.fillStyle = activeSide === 'right' ? `hsla(${hue},90%,75%,1)` : `hsla(${hue},30%,40%,0.4)`;
+  ctx.fillStyle = 'rgba(180,100,30,0.6)';
+  ctx.font = `11px 'Courier New',monospace`;
+  ctx.fillText(`BEST: ${best}`, W / 2, 44);
+}
+
+function drawCeilingWarning() {
+  // Warning line at ceiling
+  ctx.strokeStyle = 'rgba(200,50,10,0.4)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 6]);
   ctx.beginPath();
-  ctx.arc(rightX, indY, activeSide === 'right' ? 9 : 6, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = `hsla(${hue},50%,80%,0.7)`;
-  ctx.fillText('R', rightX, indY + 4);
-
-  // Tap hint line
-  ctx.fillStyle = `hsla(${hue},40%,60%,0.5)`;
-  ctx.font = `${Math.round(H * 0.02)}px 'Courier New', monospace`;
-  ctx.fillText('TAP WHEN RING PEAKS', W / 2, indY + 24);
+  ctx.moveTo(0, CEIL_PAD + BLOCK_SIZE);
+  ctx.lineTo(W, CEIL_PAD + BLOCK_SIZE);
+  ctx.stroke();
+  ctx.setLineDash([]);
 }
 
 function drawStartScreen() {
   drawBg();
 
+  // Animated background gears
+  for (const g of bgGears) {
+    drawGear(g.x, g.y, g.r, g.teeth, g.angle, g.alpha * 2);
+  }
+
   // Title
-  ctx.fillStyle = `hsla(${hue},90%,80%,1)`;
-  ctx.font = `bold ${Math.round(H * 0.07)}px 'Courier New', monospace`;
+  ctx.save();
   ctx.textAlign = 'center';
-  ctx.fillText('PISTON', W / 2, H * 0.35);
 
-  ctx.fillStyle = `hsla(${(hue + 40) % 360},90%,75%,1)`;
-  ctx.fillText('PAIR', W / 2, H * 0.35 + Math.round(H * 0.08));
+  ctx.fillStyle = '#c06010';
+  ctx.font = `bold ${Math.round(H * 0.085)}px 'Courier New',monospace`;
+  ctx.shadowColor = '#ff8020';
+  ctx.shadowBlur = 20;
+  ctx.fillText('PISTON', W / 2, H * 0.30);
+  ctx.fillStyle = '#e09040';
+  ctx.fillText('PAIR', W / 2, H * 0.30 + Math.round(H * 0.09));
+  ctx.shadowBlur = 0;
 
-  // Subtitle
-  ctx.fillStyle = `hsla(${hue},60%,65%,0.8)`;
-  ctx.font = `${Math.round(H * 0.028)}px 'Courier New', monospace`;
-  ctx.fillText('TIME THE RING. TAP. STACK.', W / 2, H * 0.55);
+  // Show sample cogs
+  drawCogBlock(W / 2 - 55, H * 0.50, 38, 0, false, Date.now() * 0.001);
+  drawCogBlock(W / 2 + 55, H * 0.50, 38, 1, false, -Date.now() * 0.0012);
 
-  // Tap to start
-  const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 400);
-  ctx.fillStyle = `hsla(${hue},80%,75%,${pulse})`;
-  ctx.font = `${Math.round(H * 0.035)}px 'Courier New', monospace`;
-  ctx.fillText('TAP TO START', W / 2, H * 0.70);
+  ctx.fillStyle = 'rgba(200,120,40,0.7)';
+  ctx.font = `12px 'Courier New',monospace`;
+  ctx.fillText('← TAP LEFT or RIGHT →', W / 2, H * 0.63);
+  ctx.fillText('ROUTE COGS TO MATCHING PISTONS', W / 2, H * 0.68);
+
+  const pulse = 0.65 + 0.35 * Math.sin(Date.now() / 450);
+  ctx.fillStyle = `rgba(230,150,40,${pulse})`;
+  ctx.font = `bold 18px 'Courier New',monospace`;
+  ctx.fillText('TAP TO START', W / 2, H * 0.80);
 
   if (best > 0) {
-    ctx.fillStyle = `hsla(${hue},50%,60%,0.6)`;
-    ctx.font = `${Math.round(H * 0.025)}px 'Courier New', monospace`;
-    ctx.fillText(`BEST: ${best}`, W / 2, H * 0.78);
+    ctx.fillStyle = 'rgba(180,100,30,0.7)';
+    ctx.font = `12px 'Courier New',monospace`;
+    ctx.fillText(`BEST: ${best} BLOCKS`, W / 2, H * 0.87);
   }
+
+  ctx.restore();
 }
 
 function drawGameOverScreen() {
-  // Darken
-  ctx.fillStyle = 'rgba(10,3,25,0.75)';
+  ctx.fillStyle = 'rgba(8,3,0,0.80)';
   ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = `hsla(0,80%,65%,1)`;
-  ctx.font = `bold ${Math.round(H * 0.06)}px 'Courier New', monospace`;
+  ctx.save();
   ctx.textAlign = 'center';
-  ctx.fillText('MISSED', W / 2, H * 0.36);
 
-  ctx.fillStyle = `hsla(${hue},90%,80%,1)`;
-  ctx.font = `bold ${Math.round(H * 0.09)}px 'Courier New', monospace`;
-  ctx.fillText(score, W / 2, H * 0.48);
+  ctx.fillStyle = '#ff4010';
+  ctx.font = `bold ${Math.round(H * 0.065)}px 'Courier New',monospace`;
+  ctx.shadowColor = '#ff2000';
+  ctx.shadowBlur = 18;
+  ctx.fillText('OVERLOAD!', W / 2, H * 0.33);
+  ctx.shadowBlur = 0;
 
-  ctx.fillStyle = `hsla(${hue},50%,65%,0.8)`;
-  ctx.font = `${Math.round(H * 0.028)}px 'Courier New', monospace`;
-  ctx.fillText(`BEST: ${best}`, W / 2, H * 0.57);
+  ctx.fillStyle = '#e09040';
+  ctx.font = `bold ${Math.round(H * 0.10)}px 'Courier New',monospace`;
+  ctx.fillText(score, W / 2, H * 0.47);
 
-  const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 400);
-  ctx.fillStyle = `hsla(${hue},80%,75%,${pulse})`;
-  ctx.font = `${Math.round(H * 0.035)}px 'Courier New', monospace`;
-  ctx.fillText('TAP TO RETRY', W / 2, H * 0.70);
+  ctx.fillStyle = 'rgba(200,120,40,0.75)';
+  ctx.font = `13px 'Courier New',monospace`;
+  ctx.fillText('BLOCKS PLACED', W / 2, H * 0.54);
+
+  ctx.fillStyle = 'rgba(180,100,30,0.7)';
+  ctx.font = `12px 'Courier New',monospace`;
+  ctx.fillText(`BEST: ${best}`, W / 2, H * 0.61);
+
+  const pulse = 0.65 + 0.35 * Math.sin(Date.now() / 450);
+  ctx.fillStyle = `rgba(230,150,40,${pulse})`;
+  ctx.font = `bold 18px 'Courier New',monospace`;
+  ctx.fillText('TAP TO RETRY', W / 2, H * 0.75);
+
+  ctx.restore();
 }
 
-// --- Update ---
-function updatePistons(dt) {
-  for (const [side, p] of Object.entries(pistons)) {
-    p.ringT += 0.045 * p.speed * ringSpeedMult;
-    if (p.stamping) {
-      p.stampT = Math.min(p.stampT + dt * 3.5, 1);
+// ── update ──────────────────────────────────────────────────
+function updateBgGears(dt) {
+  for (const g of bgGears) g.angle += g.speed * dt * 60;
+}
+
+function updateFallingBlock(dt) {
+  const fb = fallingBlock;
+  if (!fb) return;
+
+  if (fb.sliding) {
+    fb.slideT = Math.min(fb.slideT + dt * 5, 1);
+    const t = 1 - Math.pow(1 - fb.slideT, 3); // ease out cubic
+    fb.x = fb.startX + (fb.targetX - fb.startX) * t;
+    fb.y = fb.startY + (fb.targetY - fb.startY) * t;
+    fb.angle += dt * 8;
+    if (fb.slideT >= 1) {
+      placeBlock(fb);
     }
+    return;
   }
-}
 
-function updateBlock(dt) {
-  if (!block) { spawnBlock(); return; }
-  if (block.locked) return;
+  fb.y += fb.vy * dt * 60;
+  fb.angle += dt * 1.5;
 
-  block.y += block.vel;
-
-  // If block falls past stack top without being caught → game over
-  const stackTop = getStackTop();
-  if (block.y + block.h > stackTop + 6) {
-    triggerGameOver();
+  // If block falls past pistons without being routed → game over
+  if (fb.y > pistonTopY() + 10) {
+    // missed — treat as overload
+    state = 'gameover';
+    shakeFrames = 28;
+    shakeAmt = 10;
+    spawnSteam(W / 2, pistonTopY());
+    for (let i = 0; i < 20; i++) spawnSteam(W / 2 + (Math.random() - 0.5) * 80, pistonTopY());
   }
 }
 
 function updateParticles(dt) {
   for (let i = particles.length - 1; i >= 0; i--) {
     const p = particles[i];
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += 0.12;
-    p.life -= p.decay;
+    p.x += p.vx * dt * 60;
+    p.y += p.vy * dt * 60;
+    if (p.type === 'spark') p.vy += 0.15;
+    else p.size += dt * 20;
+    p.life -= p.decay * dt * 60;
     if (p.life <= 0) particles.splice(i, 1);
-  }
-  for (let i = impactFlashes.length - 1; i >= 0; i--) {
-    const f = impactFlashes[i];
-    f.r += (f.maxR - f.r) * 0.25;
-    f.life -= 0.06;
-    if (f.life <= 0) impactFlashes.splice(i, 1);
   }
 }
 
-// --- Game Loop ---
-let lastTime = 0;
+function updatePistonPump(dt) {
+  for (const side of ['left', 'right']) {
+    if (pistonPump[side] > 0) {
+      pistonPump[side] = Math.max(0, pistonPump[side] - dt * 3);
+    }
+  }
+}
+
+// ── main loop ───────────────────────────────────────────────
+let last = 0;
 function loop(ts) {
   requestAnimationFrame(loop);
-  const dt = Math.min((ts - lastTime) / 1000 * 60, 3);
-  lastTime = ts;
+  const dt = Math.min((ts - last) / 1000, 0.05);
+  last = ts;
 
-  updateShaftGeom();
-
-  // Shake
+  // Shake offset
   let sx = 0, sy = 0;
   if (shakeFrames > 0) {
     sx = (Math.random() - 0.5) * shakeAmt;
     sy = (Math.random() - 0.5) * shakeAmt;
     shakeFrames--;
-    if (shakeFrames === 0) shakeAmt = 0;
+    shakeAmt *= 0.9;
   }
 
   ctx.save();
   ctx.translate(sx, sy);
 
   if (state === 'start') {
+    updateBgGears(dt);
     drawStartScreen();
   } else if (state === 'playing') {
-    updatePistons(dt);
-    updateBlock(dt);
+    updateBgGears(dt);
+    updateFallingBlock(dt);
     updateParticles(dt);
-
-    diffTimer += dt;
+    updatePistonPump(dt);
 
     drawBg();
-    drawShaft();
-    drawStack();
+    drawCeilingWarning();
+    drawDivider();
+    drawTower('left');
+    drawTower('right');
+    drawPiston('left');
+    drawPiston('right');
     drawFallingBlock();
-    drawImpactFlashes();
     drawParticles();
-    drawPiston('left', pistons.left, dt);
-    drawPiston('right', pistons.right, dt);
-    drawScore();
     drawHUD();
   } else if (state === 'gameover') {
+    updateBgGears(dt);
     updateParticles(dt);
 
     drawBg();
-    drawShaft();
-    drawStack();
-    drawImpactFlashes();
+    drawCeilingWarning();
+    drawDivider();
+    drawTower('left');
+    drawTower('right');
+    drawPiston('left');
+    drawPiston('right');
     drawParticles();
-    drawPiston('left', pistons.left, dt);
-    drawPiston('right', pistons.right, dt);
-    drawScore();
+    drawHUD();
     drawGameOverScreen();
   }
 
   ctx.restore();
 }
 
+initBgGears();
 requestAnimationFrame(loop);
 </script>
 </body>
